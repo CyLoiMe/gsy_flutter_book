@@ -1,7 +1,20 @@
-name: Build EPUB (Smart Cache & Clean)
+name: Build EPUB (Multi-Device)
 
 on:
   workflow_dispatch: 
+  schedule:
+    # 使用 cron 表达式，意思是“每隔 5 天的凌晨 0 点自动运行一次”
+    - cron: '0 0 */5 * *'
+    inputs:
+      target_device:
+        description: '选择目标阅读设备 (决定图片压缩策略)'
+        required: true
+        default: 'boox_p6'
+        type: choice
+        options:
+          - boox_p6    # 文石 P6 (黑白墨水屏，极限压缩体积)
+          - phone_2k   # 2K 手机/平板 (彩色高清，适度压缩)
+          - original   # 电脑端 (保留 1.5GB 巨无霸原图)
 
 jobs:
   build:
@@ -19,24 +32,23 @@ jobs:
       - name: 安装基础依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y calibre
+          sudo apt-get install -y calibre imagemagick
           npm install -g gitbook-cli
           npm install -g svgexport
           pip3 install requests
 
-      - name: 📦 恢复本地图片缓存 (秒读之前下好的图)
+      - name: 📦 读取原有的 1.5GB 高清图片缓存 (秒读，不再下载！)
         uses: actions/cache@v4
         with:
           path: |
             local_images/
             image_cache.json
-          # 根据 md 文件的内容生成缓存的唯一钥匙
+          # 撤销了之前的 -compressed 后缀，精准命中你那 1.5GB 的原版缓存
           key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
-          # 如果文件有变动，退而求其次读取上一次的旧缓存，实现"增量更新"
           restore-keys: |
             ${{ runner.os }}-gitbook-images-
 
-      - name: 🚀 智能清理与增量下载 (遇到已缓存图片直接跳过)
+      - name: 🚀 智能清理与路径替换
         run: |
           cat << 'EOF' > pre_download.py
           import os, re, requests, uuid, json
@@ -45,7 +57,6 @@ jobs:
           IMG_DIR = 'local_images'
           os.makedirs(IMG_DIR, exist_ok=True)
 
-          # 载入上次运行存下来的记账本
           url_cache = {}
           if os.path.exists(CACHE_FILE):
               with open(CACHE_FILE, 'r', encoding='utf-8') as f:
@@ -59,12 +70,10 @@ jobs:
                       with open(filepath, 'r', encoding='utf-8') as f:
                           content = f.read()
 
-                      # 1. 剔除作者本地绝对路径 (C盘死链)
                       def replacer_win_md(match):
                           return f"> *[作者本地图片缺失: {match.group(2)}]*"
                       content = re.sub(r'!\[([^\]]*)\]\(([a-zA-Z]:[\\/][^\)]+)\)', replacer_win_md, content)
 
-                      # 2. 增量下载网络图片
                       def download_img(url):
                           filename = url_cache.get(url)
                           if not filename:
@@ -80,11 +89,10 @@ jobs:
                                       save_path = os.path.join(IMG_DIR, filename)
                                       with open(save_path, 'wb') as img_f:
                                           img_f.write(r.content)
-                                      url_cache[url] = filename  # 记账
+                                      url_cache[url] = filename
                               except Exception:
                                   pass
                           
-                          # 只要图片存在，就计算它的相对路径给 GitBook 用
                           if filename:
                               save_path = os.path.join(IMG_DIR, filename)
                               if os.path.exists(save_path):
@@ -96,7 +104,6 @@ jobs:
                           alt, url = match.group(1), match.group(2)
                           local_file = download_img(url)
                           if local_file: return f"![{alt}]({local_file})"
-                          print(f"Skipped (Timeout/Error): {url}")
                           return f"> *[网络图片失效跳过: {url}]*"
 
                       content = re.sub(r'!\[([^\]]*)\]\((https?://[^\)]+)\)', replacer_md, content)
@@ -104,11 +111,24 @@ jobs:
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(content)
 
-          # 保存记账本，留给下一次 Action 使用
           with open(CACHE_FILE, 'w', encoding='utf-8') as f:
               json.dump(url_cache, f, ensure_ascii=False, indent=2)
           EOF
           python3 pre_download.py
+
+      - name: 🗜️ 动态处理图片 (基于你的选择)
+        run: |
+          DEVICE="${{ github.event.inputs.target_device }}"
+          
+          if [ "$DEVICE" = "boox_p6" ]; then
+            echo "正在针对 Boox P6 优化: 缩放到 824 像素宽、转为灰度、压缩画质..."
+            find local_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -exec mogrify -resize '824x>' -colorspace Gray -quality 70 {} +
+          elif [ "$DEVICE" = "phone_2k" ]; then
+            echo "正在针对 2K 手机优化: 缩放到 1440 像素宽、保留彩色、适度压缩画质..."
+            find local_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -exec mogrify -resize '1440x>' -quality 80 {} +
+          else
+            echo "选择了保留原图，跳过压缩。"
+          fi
 
       - name: 安装插件并生成 EPUB
         run: |
@@ -118,5 +138,5 @@ jobs:
       - name: 提取生成的 EPUB 文件
         uses: actions/upload-artifact@v4
         with:
-          name: FlutterBook-EPUB
+          name: FlutterBook-EPUB-${{ github.event.inputs.target_device }}
           path: ./FlutterBook.epub
