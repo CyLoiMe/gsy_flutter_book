@@ -1,21 +1,27 @@
-name: Build EPUB (Multi-Device)
+name: Build EPUB (Dual Cache & Auto-Keep-Alive)
 
 on:
   workflow_dispatch: 
     inputs:
       target_device:
-        description: '选择目标阅读设备 (决定图片压缩策略)'
+        description: '选择目标阅读设备'
         required: true
         default: 'boox_p6'
         type: choice
         options:
-          - boox_p6    # 文石 P6 (黑白墨水屏，极限压缩体积)
-          - phone_2k   # 2K 手机/平板 (彩色高清，适度压缩)
-          - original   # 电脑端 (保留 1.5GB 巨无霸原图)
+          - boox_p6    # 文石 P6 (极小体积，黑白灰度)
+          - phone_2k   # 2K 手机 (适中体积，保留色彩)
+          - original   # 电脑端 (保留 1.5GB 原图)
+  schedule:
+    # 自动保活：每 5 天的凌晨 0 点运行一次，自动按 original 模式跑，重置缓存寿命但不消耗算力压缩
+    - cron: '0 0 */5 * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 将设备选项设置为全局环境变量，如果为空（定时任务触发）则默认设为 original
+    env:
+      TARGET_DEVICE: ${{ github.event.inputs.target_device || 'original' }}
     
     steps:
       - name: 检出源码
@@ -34,25 +40,39 @@ jobs:
           npm install -g svgexport
           pip3 install requests
 
-      - name: 📦 读取原有的 1.5GB 高清图片缓存 (秒读，不再下载！)
+      - name: 📦 1. 恢复原图底包缓存 (1.5GB高清原库)
         uses: actions/cache@v4
         with:
           path: |
-            local_images/
+            original_images/
             image_cache.json
-          # 撤销了之前的 -compressed 后缀，精准命中你那 1.5GB 的原版缓存
-          key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
+          key: ${{ runner.os }}-images-base-${{ hashFiles('**/*.md') }}
           restore-keys: |
-            ${{ runner.os }}-gitbook-images-
+            ${{ runner.os }}-images-base-
 
-      - name: 🚀 智能清理与路径替换
+      - name: 📦 2. 恢复压缩成品缓存 (针对当前选中设备的专属图库)
+        if: env.TARGET_DEVICE != 'original'
+        uses: actions/cache@v4
+        with:
+          path: processed_images/
+          # 缓存 Key 带上设备名称，实现各设备图库物理隔离
+          key: ${{ runner.os }}-images-${{ env.TARGET_DEVICE }}-${{ hashFiles('**/*.md') }}
+
+      - name: 🚀 智能路径分配与预下载
         run: |
           cat << 'EOF' > pre_download.py
           import os, re, requests, uuid, json
 
           CACHE_FILE = 'image_cache.json'
-          IMG_DIR = 'local_images'
-          os.makedirs(IMG_DIR, exist_ok=True)
+          ORIGINAL_DIR = 'original_images'
+          target_device = os.environ.get('TARGET_DEVICE', 'original')
+          
+          # 如果选了原图，直接用原图库；如果选了具体设备，把 Markdown 图片路径指向成品库
+          USED_DIR = 'processed_images' if target_device != 'original' else ORIGINAL_DIR
+
+          os.makedirs(ORIGINAL_DIR, exist_ok=True)
+          if target_device != 'original':
+              os.makedirs(USED_DIR, exist_ok=True)
 
           url_cache = {}
           if os.path.exists(CACHE_FILE):
@@ -60,7 +80,7 @@ jobs:
                   url_cache = json.load(f)
 
           for root, dirs, files in os.walk('.'):
-              if 'node_modules' in root or '.git' in root or IMG_DIR in root: continue
+              if 'node_modules' in root or '.git' in root or ORIGINAL_DIR in root or USED_DIR in root: continue
               for file in files:
                   if file.endswith('.md'):
                       filepath = os.path.join(root, file)
@@ -73,6 +93,7 @@ jobs:
 
                       def download_img(url):
                           filename = url_cache.get(url)
+                          # 只要原图库里没有，就去下载到原图库里
                           if not filename:
                               try:
                                   headers = {'User-Agent': 'Mozilla/5.0'}
@@ -83,7 +104,7 @@ jobs:
                                       elif '.jpg' in url.lower() or '.jpeg' in url.lower(): ext = 'jpg'
                                       elif '.gif' in url.lower(): ext = 'gif'
                                       filename = f"img_{uuid.uuid4().hex[:8]}.{ext}"
-                                      save_path = os.path.join(IMG_DIR, filename)
+                                      save_path = os.path.join(ORIGINAL_DIR, filename)
                                       with open(save_path, 'wb') as img_f:
                                           img_f.write(r.content)
                                       url_cache[url] = filename
@@ -91,10 +112,10 @@ jobs:
                                   pass
                           
                           if filename:
-                              save_path = os.path.join(IMG_DIR, filename)
-                              if os.path.exists(save_path):
-                                  rel_path = os.path.relpath(save_path, start=os.path.dirname(filepath))
-                                  return rel_path.replace('\\', '/')
+                              # 代码中的路径永远指向要打包的那个库（USED_DIR）
+                              save_path = os.path.join(USED_DIR, filename)
+                              rel_path = os.path.relpath(save_path, start=os.path.dirname(filepath))
+                              return rel_path.replace('\\', '/')
                           return None
 
                       def replacer_md(match):
@@ -113,18 +134,28 @@ jobs:
           EOF
           python3 pre_download.py
 
-      - name: 🗜️ 动态处理图片 (基于你的选择)
+      - name: 🗜️ 检查成品库状态并执行并发转换 (修复内存溢出)
         run: |
-          DEVICE="${{ github.event.inputs.target_device }}"
+          DEVICE="$TARGET_DEVICE"
           
-          if [ "$DEVICE" = "boox_p6" ]; then
-            echo "正在针对 Boox P6 优化: 缩放到 824 像素宽、转为灰度、压缩画质..."
-            find local_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -exec mogrify -resize '824x>' -colorspace Gray -quality 70 {} +
-          elif [ "$DEVICE" = "phone_2k" ]; then
-            echo "正在针对 2K 手机优化: 缩放到 1440 像素宽、保留彩色、适度压缩画质..."
-            find local_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -exec mogrify -resize '1440x>' -quality 80 {} +
+          if [ "$DEVICE" != "original" ]; then
+            # 如果成品库文件夹为空，说明没有命中当前设备的缓存，需要从原图库复制并处理
+            if [ -z "$(ls -A processed_images/)" ]; then
+              echo "🚧 没有命中 $DEVICE 的压缩缓存，正在从 1.5GB 原图库复制并处理..."
+              cp -a original_images/. processed_images/
+              
+              if [ "$DEVICE" = "boox_p6" ]; then
+                echo "启动多线程并发压缩 (Boox P6): 缩放到 824 像素宽、转为灰度、画质 70..."
+                find processed_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -print0 | xargs -0 -n 1 -P 4 mogrify -resize '824x>' -colorspace Gray -quality 70
+              elif [ "$DEVICE" = "phone_2k" ]; then
+                echo "启动多线程并发压缩 (2K 手机): 缩放到 1440 像素宽、画质 80..."
+                find processed_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -print0 | xargs -0 -n 1 -P 4 mogrify -resize '1440x>' -quality 80
+              fi
+            else
+              echo "🎉 完美命中 $DEVICE 专属成品缓存！跳过耗时的图片压缩，直接起飞！"
+            fi
           else
-            echo "选择了保留原图，跳过压缩。"
+            echo "选择原图模式或定时保活触发，跳过压缩步骤。"
           fi
 
       - name: 安装插件并生成 EPUB
@@ -135,5 +166,5 @@ jobs:
       - name: 提取生成的 EPUB 文件
         uses: actions/upload-artifact@v4
         with:
-          name: FlutterBook-EPUB-${{ github.event.inputs.target_device }}
+          name: FlutterBook-EPUB-${{ env.TARGET_DEVICE }}
           path: ./FlutterBook.epub
