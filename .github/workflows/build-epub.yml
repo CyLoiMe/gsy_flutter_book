@@ -46,7 +46,7 @@ jobs:
           path: |
             original_images/
             image_cache.json
-          key: ${{ runner.os }}-images-base-${{ hashFiles('**/*.md') }}
+          key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
           restore-keys: |
             ${{ runner.os }}-images-base-
 
