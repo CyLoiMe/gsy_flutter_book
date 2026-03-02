@@ -1,6 +1,5 @@
 name: Build EPUB
 
-# 允许手动点击按钮触发
 on:
   workflow_dispatch: 
 
@@ -12,18 +11,20 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: 设置 Node.js v10 (完美避开 gitbook-cli 报错)
+      - name: 设置 Node.js v10
         uses: actions/setup-node@v4
         with:
           node-version: '10'
 
-      - name: 安装 Calibre (GitBook 生成 EPUB 的必备底层依赖)
+      - name: 安装 Calibre
         run: |
           sudo apt-get update
           sudo apt-get install -y calibre
 
-      - name: 安装 GitBook 环境
-        run: npm install -g gitbook-cli
+      - name: 安装 GitBook 和绘图依赖
+        run: |
+          npm install -g gitbook-cli
+          npm install -g svgexport
 
       - name: 安装插件并生成 EPUB
         run: |
