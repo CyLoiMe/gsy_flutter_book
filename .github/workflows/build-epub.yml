@@ -2,9 +2,6 @@ name: Build EPUB (Multi-Device)
 
 on:
   workflow_dispatch: 
-  schedule:
-    # 使用 cron 表达式，意思是“每隔 5 天的凌晨 0 点自动运行一次”
-    - cron: '0 0 */5 * *'
     inputs:
       target_device:
         description: '选择目标阅读设备 (决定图片压缩策略)'
