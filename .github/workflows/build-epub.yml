@@ -1,4 +1,4 @@
-name: Build EPUB with mdBook
+name: Build EPUB (Smart Image Fetch)
 
 on:
   workflow_dispatch: 
@@ -11,33 +11,84 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: 安装 mdBook
-        uses: peaceiris/actions-mdbook@v2
+      - name: 设置 Node.js v10 & Python 环境
+        uses: actions/setup-node@v4
         with:
-          mdbook-version: 'latest'
+          node-version: '10'
 
-      - name: 安装 mdbook-epub 插件
+      - name: 安装基础依赖
         run: |
-          wget https://github.com/HaoZeke/mdbook-epub/releases/download/v0.4.38/mdbook-epub-v0.4.38-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf mdbook-epub-v0.4.38-x86_64-unknown-linux-musl.tar.gz
-          sudo mv mdbook-epub /usr/local/bin/
+          sudo apt-get update
+          sudo apt-get install -y calibre
+          npm install -g gitbook-cli
+          npm install -g svgexport
+          pip3 install requests
 
-      - name: 生成配置文件
+      - name: 🚀 智能预下载网络图片 (超时 5 秒跳过死图)
         run: |
-          cat <<EOF > book.toml
-          [book]
-          authors = ["CarGuo"]
-          language = "zh-cn"
-          src = "."
-          title = "Flutter 完整开发实战详解"
-          [output.epub]
+          cat << 'EOF' > pre_download.py
+          import os, re, requests, uuid
+
+          for root, dirs, files in os.walk('.'):
+              if 'node_modules' in root or '.git' in root: continue
+              for file in files:
+                  if file.endswith('.md'):
+                      filepath = os.path.join(root, file)
+                      with open(filepath, 'r', encoding='utf-8') as f:
+                          content = f.read()
+
+                      def download_img(url):
+                          try:
+                              # 伪装成正常浏览器，防止被图床拦截
+                              headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                              r = requests.get(url, timeout=30, headers=headers)
+                              if r.status_code == 200:
+                                  ext = 'png'
+                                  if '.svg' in url.lower(): ext = 'svg'
+                                  elif '.jpg' in url.lower() or '.jpeg' in url.lower(): ext = 'jpg'
+                                  elif '.gif' in url.lower(): ext = 'gif'
+                                  filename = f"img_{uuid.uuid4().hex[:8]}.{ext}"
+                                  save_path = os.path.join(os.path.dirname(filepath), filename)
+                                  with open(save_path, 'wb') as img_f:
+                                      img_f.write(r.content)
+                                  return filename
+                          except Exception as e:
+                              pass
+                          return None
+
+                      def replacer_md(match):
+                          alt = match.group(1)
+                          url = match.group(2)
+                          local_file = download_img(url)
+                          if local_file: return f"![{alt}]({local_file})"
+                          print(f"Skipped (Timeout/Error): {url}")
+                          return f"> *[图片下载超时跳过: {url}]*"
+
+                      def replacer_html(match):
+                          prefix = match.group(1)
+                          url = match.group(2)
+                          suffix = match.group(3)
+                          local_file = download_img(url)
+                          if local_file: return f'{prefix}"{local_file}"{suffix}'
+                          print(f"Skipped (Timeout/Error): {url}")
+                          return f"<p><i>[图片下载超时跳过: {url}]</i></p>"
+
+                      # 同时匹配 Markdown 标准图和 HTML img 标签图
+                      content = re.sub(r'!\[([^\]]*)\]\((https?://[^\)]+)\)', replacer_md, content)
+                      content = re.sub(r'(<img[^>]*?src=)"(https?://[^"]+)"([^>]*?>)', replacer_html, content)
+
+                      with open(filepath, 'w', encoding='utf-8') as f:
+                          f.write(content)
           EOF
+          python3 pre_download.py
 
-      - name: 生成 EPUB (遇到死图会自动跳过不报错)
-        run: mdbook build
+      - name: 安装插件并生成 EPUB (此时全部为本地图片，极速通过)
+        run: |
+          gitbook install
+          gitbook epub ./ ./FlutterBook.epub
 
       - name: 提取生成的 EPUB 文件
         uses: actions/upload-artifact@v4
         with:
-          name: FlutterBook-mdBook-EPUB
-          path: book/epub/Flutter 完整开发实战详解.epub
+          name: FlutterBook-EPUB
+          path: ./FlutterBook.epub
