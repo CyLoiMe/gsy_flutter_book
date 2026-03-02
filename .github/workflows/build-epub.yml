@@ -1,4 +1,4 @@
-name: Build EPUB
+name: Build EPUB with mdBook
 
 on:
   workflow_dispatch: 
@@ -11,28 +11,33 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: 设置 Node.js v10
-        uses: actions/setup-node@v4
+      - name: 安装 mdBook
+        uses: peaceiris/actions-mdbook@v2
         with:
-          node-version: '10'
+          mdbook-version: 'latest'
 
-      - name: 安装 Calibre
+      - name: 安装 mdbook-epub 插件
         run: |
-          sudo apt-get update
-          sudo apt-get install -y calibre
+          wget https://github.com/HaoZeke/mdbook-epub/releases/download/v0.4.38/mdbook-epub-v0.4.38-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf mdbook-epub-v0.4.38-x86_64-unknown-linux-musl.tar.gz
+          sudo mv mdbook-epub /usr/local/bin/
 
-      - name: 安装 GitBook 和绘图依赖
+      - name: 生成配置文件
         run: |
-          npm install -g gitbook-cli
-          npm install -g svgexport
+          cat <<EOF > book.toml
+          [book]
+          authors = ["CarGuo"]
+          language = "zh-cn"
+          src = "."
+          title = "Flutter 完整开发实战详解"
+          [output.epub]
+          EOF
 
-      - name: 安装插件并生成 EPUB
-        run: |
-          gitbook install
-          gitbook epub ./ ./FlutterBook.epub
+      - name: 生成 EPUB (遇到死图会自动跳过不报错)
+        run: mdbook build
 
       - name: 提取生成的 EPUB 文件
         uses: actions/upload-artifact@v4
         with:
-          name: FlutterBook-EPUB
-          path: ./FlutterBook.epub
+          name: FlutterBook-mdBook-EPUB
+          path: book/epub/Flutter 完整开发实战详解.epub
