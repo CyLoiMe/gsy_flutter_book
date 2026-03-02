@@ -40,15 +40,27 @@ jobs:
           npm install -g svgexport
           pip3 install requests
 
-      - name: 📦 1. 恢复原图底包缓存 (1.5GB高清原库)
+      - name: 📦 1. 恢复原图底包缓存 (读取老版本的 local_images)
         uses: actions/cache@v4
         with:
+          # 必须用原先的路径名 local_images 才能把包裹解压出来！
           path: |
-            original_images/
+            local_images/
             image_cache.json
           key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
+          # 备用钥匙也必须完全统一
           restore-keys: |
-            ${{ runner.os }}-images-base-
+            ${{ runner.os }}-gitbook-images-
+
+      - name: 🔄 对接旧缓存到新架构 (无缝改名)
+        run: |
+          # 如果成功解压出了老版本的 local_images，直接把它改名为新架构需要的 original_images
+          if [ -d "local_images" ]; then
+            mv local_images original_images
+            echo "🎉 成功找回 1.5GB 旧缓存，并已接入双重缓存架构！"
+          else
+            echo "未找到旧缓存文件夹。"
+          fi
 
       - name: 📦 2. 恢复压缩成品缓存 (针对当前选中设备的专属图库)
         if: env.TARGET_DEVICE != 'original'
