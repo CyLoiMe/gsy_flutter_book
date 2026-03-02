@@ -1,4 +1,4 @@
-name: Build EPUB (Smart Image Fetch)
+name: Build EPUB (Smart Fetch & Clean)
 
 on:
   workflow_dispatch: 
@@ -24,7 +24,7 @@ jobs:
           npm install -g svgexport
           pip3 install requests
 
-      - name: 🚀 智能预下载网络图片 (超时 5 秒跳过死图)
+      - name: 🚀 智能清理与预下载 (剔除作者本地死链 + 自动下载网络图)
         run: |
           cat << 'EOF' > pre_download.py
           import os, re, requests, uuid
@@ -37,11 +37,19 @@ jobs:
                       with open(filepath, 'r', encoding='utf-8') as f:
                           content = f.read()
 
+                      # 1. 剔除作者误填的 Windows 本地 C 盘/D 盘绝对路径
+                      def replacer_win_md(match):
+                          path = match.group(2)
+                          print(f"Removed local absolute path: {path}")
+                          return f"> *[作者本地图片缺失: {path}]*"
+                      # 匹配 c:/, C:\ 等绝对路径
+                      content = re.sub(r'!\[([^\]]*)\]\(([a-zA-Z]:[\\/][^\)]+)\)', replacer_win_md, content)
+
+                      # 2. 预下载正常的网络图片
                       def download_img(url):
                           try:
-                              # 伪装成正常浏览器，防止被图床拦截
-                              headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                              r = requests.get(url, timeout=30, headers=headers)
+                              headers = {'User-Agent': 'Mozilla/5.0'}
+                              r = requests.get(url, timeout=10, headers=headers)
                               if r.status_code == 200:
                                   ext = 'png'
                                   if '.svg' in url.lower(): ext = 'svg'
@@ -52,37 +60,25 @@ jobs:
                                   with open(save_path, 'wb') as img_f:
                                       img_f.write(r.content)
                                   return filename
-                          except Exception as e:
+                          except Exception:
                               pass
                           return None
 
                       def replacer_md(match):
-                          alt = match.group(1)
-                          url = match.group(2)
+                          alt, url = match.group(1), match.group(2)
                           local_file = download_img(url)
                           if local_file: return f"![{alt}]({local_file})"
                           print(f"Skipped (Timeout/Error): {url}")
-                          return f"> *[图片下载超时跳过: {url}]*"
+                          return f"> *[网络图片失效跳过: {url}]*"
 
-                      def replacer_html(match):
-                          prefix = match.group(1)
-                          url = match.group(2)
-                          suffix = match.group(3)
-                          local_file = download_img(url)
-                          if local_file: return f'{prefix}"{local_file}"{suffix}'
-                          print(f"Skipped (Timeout/Error): {url}")
-                          return f"<p><i>[图片下载超时跳过: {url}]</i></p>"
-
-                      # 同时匹配 Markdown 标准图和 HTML img 标签图
                       content = re.sub(r'!\[([^\]]*)\]\((https?://[^\)]+)\)', replacer_md, content)
-                      content = re.sub(r'(<img[^>]*?src=)"(https?://[^"]+)"([^>]*?>)', replacer_html, content)
 
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(content)
           EOF
           python3 pre_download.py
 
-      - name: 安装插件并生成 EPUB (此时全部为本地图片，极速通过)
+      - name: 安装插件并生成 EPUB
         run: |
           gitbook install
           gitbook epub ./ ./FlutterBook.epub
