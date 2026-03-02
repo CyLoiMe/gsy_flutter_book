@@ -1,4 +1,4 @@
-name: Build EPUB (Dual Cache & Auto-Keep-Alive)
+name: Build EPUB (All Caches & Bulletproof)
 
 on:
   workflow_dispatch: 
@@ -13,13 +13,12 @@ on:
           - phone_2k   # 2K 手机 (适中体积，保留色彩)
           - original   # 电脑端 (保留 1.5GB 原图)
   schedule:
-    # 自动保活：每 5 天的凌晨 0 点运行一次，自动按 original 模式跑，重置缓存寿命但不消耗算力压缩
+    # 自动保活：每 5 天运行一次，唤醒所有缓存，重置寿命
     - cron: '0 0 */5 * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 将设备选项设置为全局环境变量，如果为空（定时任务触发）则默认设为 original
     env:
       TARGET_DEVICE: ${{ github.event.inputs.target_device || 'original' }}
     
@@ -27,12 +26,47 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
+      # ==================== 极速保活区 (仅定时任务触发) ====================
+      - name: 📦 [保活] 唤醒 Boox P6 成品缓存
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: dummy_boox/
+          key: ${{ runner.os }}-images-boox_p6-${{ hashFiles('**/*.md') }}
+
+      - name: 📦 [保活] 唤醒 2K 手机 成品缓存
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: dummy_phone/
+          key: ${{ runner.os }}-images-phone_2k-${{ hashFiles('**/*.md') }}
+
+      # ==================== 核心图库读取 (通用) ====================
+      - name: 📦 1. 恢复原图底包缓存 (读取你 1.5GB 的原始老库)
+        uses: actions/cache@v4
+        with:
+          path: |
+            local_images/
+            image_cache.json
+          key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
+          restore-keys: |
+            ${{ runner.os }}-gitbook-images-
+
+      - name: 🛑 定时保活任务完成，提前下班
+        if: github.event_name == 'schedule'
+        run: |
+          echo "🎉 所有缓存均已成功唤醒，寿命重置为 7 天！"
+          echo "跳过生成 EPUB，直接收工。"
+
+      # ==================== 环境与构建 (仅手动触发执行) ====================
       - name: 设置 Node.js v10 & Python 环境
+        if: github.event_name != 'schedule'
         uses: actions/setup-node@v4
         with:
           node-version: '10'
 
       - name: 安装基础依赖
+        if: github.event_name != 'schedule'
         run: |
           sudo apt-get update
           sudo apt-get install -y calibre imagemagick
@@ -40,46 +74,22 @@ jobs:
           npm install -g svgexport
           pip3 install requests
 
-      - name: 📦 1. 恢复原图底包缓存 (读取老版本的 local_images)
-        uses: actions/cache@v4
-        with:
-          # 必须用原先的路径名 local_images 才能把包裹解压出来！
-          path: |
-            local_images/
-            image_cache.json
-          key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
-          # 备用钥匙也必须完全统一
-          restore-keys: |
-            ${{ runner.os }}-gitbook-images-
-
-      - name: 🔄 对接旧缓存到新架构 (无缝改名)
-        run: |
-          # 如果成功解压出了老版本的 local_images，直接把它改名为新架构需要的 original_images
-          if [ -d "local_images" ]; then
-            mv local_images original_images
-            echo "🎉 成功找回 1.5GB 旧缓存，并已接入双重缓存架构！"
-          else
-            echo "未找到旧缓存文件夹。"
-          fi
-
-      - name: 📦 2. 恢复压缩成品缓存 (针对当前选中设备的专属图库)
-        if: env.TARGET_DEVICE != 'original'
+      - name: 📦 2. 恢复当前选定设备的成品缓存
+        if: github.event_name != 'schedule' && env.TARGET_DEVICE != 'original'
         uses: actions/cache@v4
         with:
           path: processed_images/
-          # 缓存 Key 带上设备名称，实现各设备图库物理隔离
           key: ${{ runner.os }}-images-${{ env.TARGET_DEVICE }}-${{ hashFiles('**/*.md') }}
 
       - name: 🚀 智能路径分配与预下载
+        if: github.event_name != 'schedule'
         run: |
           cat << 'EOF' > pre_download.py
           import os, re, requests, uuid, json
 
           CACHE_FILE = 'image_cache.json'
-          ORIGINAL_DIR = 'original_images'
+          ORIGINAL_DIR = 'local_images'
           target_device = os.environ.get('TARGET_DEVICE', 'original')
-          
-          # 如果选了原图，直接用原图库；如果选了具体设备，把 Markdown 图片路径指向成品库
           USED_DIR = 'processed_images' if target_device != 'original' else ORIGINAL_DIR
 
           os.makedirs(ORIGINAL_DIR, exist_ok=True)
@@ -105,7 +115,6 @@ jobs:
 
                       def download_img(url):
                           filename = url_cache.get(url)
-                          # 只要原图库里没有，就去下载到原图库里
                           if not filename:
                               try:
                                   headers = {'User-Agent': 'Mozilla/5.0'}
@@ -124,7 +133,6 @@ jobs:
                                   pass
                           
                           if filename:
-                              # 代码中的路径永远指向要打包的那个库（USED_DIR）
                               save_path = os.path.join(USED_DIR, filename)
                               rel_path = os.path.relpath(save_path, start=os.path.dirname(filepath))
                               return rel_path.replace('\\', '/')
@@ -146,36 +154,45 @@ jobs:
           EOF
           python3 pre_download.py
 
-      - name: 🗜️ 检查成品库状态并执行并发转换 (修复内存溢出)
+      - name: 🗜️ 检查成品库状态并执行并发转换 (防内存溢出 & 容错跳过)
+        if: github.event_name != 'schedule'
         run: |
           DEVICE="$TARGET_DEVICE"
           
+          # 解除 ImageMagick 的系统默认内存封印
+          export MAGICK_MEMORY_LIMIT=4000MB
+          export MAGICK_MAP_LIMIT=4000MB
+          export MAGICK_AREA_LIMIT=4000MB
+          export MAGICK_DISK_LIMIT=8000MB
+          
           if [ "$DEVICE" != "original" ]; then
-            # 如果成品库文件夹为空，说明没有命中当前设备的缓存，需要从原图库复制并处理
-            if [ -z "$(ls -A processed_images/)" ]; then
-              echo "🚧 没有命中 $DEVICE 的压缩缓存，正在从 1.5GB 原图库复制并处理..."
-              cp -a original_images/. processed_images/
+            if [ -z "$(ls -A processed_images/ 2>/dev/null)" ]; then
+              echo "🚧 没有命中 $DEVICE 的成品缓存，正在从 1.5GB 原图库复制并处理..."
+              cp -a local_images/. processed_images/
               
+              # 核心修改：使用 sh -c '... || true' 容错！哪怕某张变态长图压爆了，也只提示一句警告，绝对不中断整个任务！
               if [ "$DEVICE" = "boox_p6" ]; then
-                echo "启动多线程并发压缩 (Boox P6): 缩放到 824 像素宽、转为灰度、画质 70..."
-                find processed_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -print0 | xargs -0 -n 1 -P 4 mogrify -resize '824x>' -colorspace Gray -quality 70
+                echo "启动多线程并发压缩 (Boox P6)..."
+                find processed_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -print0 | xargs -0 -n 1 -P 4 -I {} sh -c "mogrify -resize '824x>' -colorspace Gray -quality 70 '{}' || echo '⚠️ 跳过超大异常图片: {}'"
               elif [ "$DEVICE" = "phone_2k" ]; then
-                echo "启动多线程并发压缩 (2K 手机): 缩放到 1440 像素宽、画质 80..."
-                find processed_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -print0 | xargs -0 -n 1 -P 4 mogrify -resize '1440x>' -quality 80
+                echo "启动多线程并发压缩 (2K 手机)..."
+                find processed_images/ -type f \( -iname \*.jpg -o -iname \*.jpeg -o -iname \*.png \) -print0 | xargs -0 -n 1 -P 4 -I {} sh -c "mogrify -resize '1440x>' -quality 80 '{}' || echo '⚠️ 跳过超大异常图片: {}'"
               fi
             else
               echo "🎉 完美命中 $DEVICE 专属成品缓存！跳过耗时的图片压缩，直接起飞！"
             fi
           else
-            echo "选择原图模式或定时保活触发，跳过压缩步骤。"
+            echo "选择原图模式，跳过压缩步骤。"
           fi
 
       - name: 安装插件并生成 EPUB
+        if: github.event_name != 'schedule'
         run: |
           gitbook install
           gitbook epub ./ ./FlutterBook.epub
 
       - name: 提取生成的 EPUB 文件
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
         with:
           name: FlutterBook-EPUB-${{ env.TARGET_DEVICE }}
