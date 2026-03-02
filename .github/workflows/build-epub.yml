@@ -1,4 +1,4 @@
-name: Build EPUB (Smart Fetch & Clean)
+name: Build EPUB (Smart Cache & Clean)
 
 on:
   workflow_dispatch: 
@@ -24,44 +24,72 @@ jobs:
           npm install -g svgexport
           pip3 install requests
 
-      - name: 🚀 智能清理与预下载 (剔除作者本地死链 + 自动下载网络图)
+      - name: 📦 恢复本地图片缓存 (秒读之前下好的图)
+        uses: actions/cache@v4
+        with:
+          path: |
+            local_images/
+            image_cache.json
+          # 根据 md 文件的内容生成缓存的唯一钥匙
+          key: ${{ runner.os }}-gitbook-images-${{ hashFiles('**/*.md') }}
+          # 如果文件有变动，退而求其次读取上一次的旧缓存，实现"增量更新"
+          restore-keys: |
+            ${{ runner.os }}-gitbook-images-
+
+      - name: 🚀 智能清理与增量下载 (遇到已缓存图片直接跳过)
         run: |
           cat << 'EOF' > pre_download.py
-          import os, re, requests, uuid
+          import os, re, requests, uuid, json
+
+          CACHE_FILE = 'image_cache.json'
+          IMG_DIR = 'local_images'
+          os.makedirs(IMG_DIR, exist_ok=True)
+
+          # 载入上次运行存下来的记账本
+          url_cache = {}
+          if os.path.exists(CACHE_FILE):
+              with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                  url_cache = json.load(f)
 
           for root, dirs, files in os.walk('.'):
-              if 'node_modules' in root or '.git' in root: continue
+              if 'node_modules' in root or '.git' in root or IMG_DIR in root: continue
               for file in files:
                   if file.endswith('.md'):
                       filepath = os.path.join(root, file)
                       with open(filepath, 'r', encoding='utf-8') as f:
                           content = f.read()
 
-                      # 1. 剔除作者误填的 Windows 本地 C 盘/D 盘绝对路径
+                      # 1. 剔除作者本地绝对路径 (C盘死链)
                       def replacer_win_md(match):
-                          path = match.group(2)
-                          print(f"Removed local absolute path: {path}")
-                          return f"> *[作者本地图片缺失: {path}]*"
-                      # 匹配 c:/, C:\ 等绝对路径
+                          return f"> *[作者本地图片缺失: {match.group(2)}]*"
                       content = re.sub(r'!\[([^\]]*)\]\(([a-zA-Z]:[\\/][^\)]+)\)', replacer_win_md, content)
 
-                      # 2. 预下载正常的网络图片
+                      # 2. 增量下载网络图片
                       def download_img(url):
-                          try:
-                              headers = {'User-Agent': 'Mozilla/5.0'}
-                              r = requests.get(url, timeout=10, headers=headers)
-                              if r.status_code == 200:
-                                  ext = 'png'
-                                  if '.svg' in url.lower(): ext = 'svg'
-                                  elif '.jpg' in url.lower() or '.jpeg' in url.lower(): ext = 'jpg'
-                                  elif '.gif' in url.lower(): ext = 'gif'
-                                  filename = f"img_{uuid.uuid4().hex[:8]}.{ext}"
-                                  save_path = os.path.join(os.path.dirname(filepath), filename)
-                                  with open(save_path, 'wb') as img_f:
-                                      img_f.write(r.content)
-                                  return filename
-                          except Exception:
-                              pass
+                          filename = url_cache.get(url)
+                          if not filename:
+                              try:
+                                  headers = {'User-Agent': 'Mozilla/5.0'}
+                                  r = requests.get(url, timeout=15, headers=headers)
+                                  if r.status_code == 200:
+                                      ext = 'png'
+                                      if '.svg' in url.lower(): ext = 'svg'
+                                      elif '.jpg' in url.lower() or '.jpeg' in url.lower(): ext = 'jpg'
+                                      elif '.gif' in url.lower(): ext = 'gif'
+                                      filename = f"img_{uuid.uuid4().hex[:8]}.{ext}"
+                                      save_path = os.path.join(IMG_DIR, filename)
+                                      with open(save_path, 'wb') as img_f:
+                                          img_f.write(r.content)
+                                      url_cache[url] = filename  # 记账
+                              except Exception:
+                                  pass
+                          
+                          # 只要图片存在，就计算它的相对路径给 GitBook 用
+                          if filename:
+                              save_path = os.path.join(IMG_DIR, filename)
+                              if os.path.exists(save_path):
+                                  rel_path = os.path.relpath(save_path, start=os.path.dirname(filepath))
+                                  return rel_path.replace('\\', '/')
                           return None
 
                       def replacer_md(match):
@@ -75,6 +103,10 @@ jobs:
 
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(content)
+
+          # 保存记账本，留给下一次 Action 使用
+          with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+              json.dump(url_cache, f, ensure_ascii=False, indent=2)
           EOF
           python3 pre_download.py
 
